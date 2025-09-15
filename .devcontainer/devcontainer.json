@@ -21,7 +21,13 @@
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash"
       },
-      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"]
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "openai.chatgpt",
+        "vadimcn.vscode-lldb",
+        "ms-vscode.cpptools"
+      ]
     }
   }
 }
