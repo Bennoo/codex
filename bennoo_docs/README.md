@@ -2,6 +2,32 @@
 
 This folder documents every crate in the `codex-rs` Cargo workspace. It provides a high‑level overview, per‑crate details, and relationships between crates to help you navigate and extend the codebase.
 
+## Documentation Index
+
+Quick links to all documentation files in this folder.
+
+| Document | Summary |
+| --- | --- |
+| [codex-ansi-escape](crates/codex-ansi-escape.md) | Small helper crate that wraps `ansi-to-tui` to convert ANSI‑escaped strings into Ratatui primitives. |
+| [codex-apply-patch](crates/codex-apply-patch.md) | Library and CLI for applying structured patches to the filesystem. |
+| [codex-arg0](crates/codex-arg0.md) | Utility crate to inspect `argv[0]` and dispatch behavior accordingly, enabling re‑exec patterns and sandbox integration. |
+| [codex-chatgpt](crates/codex-chatgpt.md) | CLI plumbing and integration to interact with ChatGPT from Codex. |
+| [codex-cli](crates/codex-cli.md) | Multipurpose CLI that provides the `codex` binary with multiple subcommands (TUI, exec, MCP, etc.). |
+| [codex-common](crates/codex-common.md) | Shared utilities used by CLIs and libraries (config, CLI helpers, elapsed time, sandbox summary, etc.). |
+| [codex-core](crates/codex-core.md) | Primary business logic for Codex. Orchestrates sessions, tools, patch application, file search, MCP interactions, and I/O. |
+| [codex-exec](crates/codex-exec.md) | Headless, non‑interactive executor for Codex workflows. Useful in CI/automation. |
+| [codex-execpolicy](crates/codex-execpolicy.md) | Classifies proposed `execv(3)` invocations according to a Starlark policy: `safe`, `match`, `forbidden`, or `unverified`. |
+| [codex-file-search](crates/codex-file-search.md) | Fast fuzzy file search library and CLI used by Codex to quickly locate files in a workspace. |
+| [codex-linux-sandbox](crates/codex-linux-sandbox.md) | Linux sandbox implementation and CLI used to confine subprocesses (Landlock + seccomp). |
+| [codex-login](crates/codex-login.md) | Implements login/OAuth flows and credentials handling for Codex CLIs. |
+| [codex-mcp-client](crates/codex-mcp-client.md) | Client implementation for the Model Context Protocol (MCP) used by Codex to connect to MCP servers. |
+| [codex-mcp-server](crates/codex-mcp-server.md) | Runs Codex as an MCP server, exposing its capabilities over the Model Context Protocol. |
+| [codex-ollama](crates/codex-ollama.md) | Integration with the Ollama model server for local LLM inference and streaming. |
+| [codex-protocol](crates/codex-protocol.md) | Defines internal and external protocol types used throughout Codex and when running as an MCP server. |
+| [codex-protocol-ts](crates/codex-protocol-ts.md) | Generates TypeScript types from `codex-protocol` using `ts-rs` for downstream tooling. |
+| [codex-tui](crates/codex-tui.md) | Full‑screen Text User Interface built with Ratatui. This is the interactive face of Codex. |
+| [mcp-types](crates/mcp-types.md) | Rust types for the Model Context Protocol (MCP). Inspired by `lsp-types`. |
+
 ## Workspace Overview
 
 The workspace root is `codex-rs/`. It contains application binaries (CLI frontends) and libraries (business logic, shared types, integrations).
@@ -144,4 +170,3 @@ For deeper details (binaries, features, responsibilities), see the linked pages.
 
 - After editing Rust crates, run `just fmt` at `codex-rs/` to format.
 - Use `cargo test -p <crate>` to run targeted tests; many TUI tests are snapshot‑based via `insta`.
-
