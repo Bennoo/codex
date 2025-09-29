@@ -1,6 +1,7 @@
 use crate::config_profile::ConfigProfile;
 use crate::config_types::History;
 use crate::config_types::McpServerConfig;
+use crate::config_types::McpServerTransportConfig;
 use crate::config_types::Notifications;
 use crate::config_types::ReasoningSummaryFormat;
 use crate::config_types::SandboxWorkspaceWrite;
@@ -37,7 +38,7 @@ use toml_edit::DocumentMut;
 use toml_edit::Item as TomlItem;
 use toml_edit::Table as TomlTable;
 
-const OPENAI_DEFAULT_MODEL: &str = "gpt-5";
+const OPENAI_DEFAULT_MODEL: &str = "gpt-5-codex";
 const OPENAI_DEFAULT_REVIEW_MODEL: &str = "gpt-5-codex";
 pub const GPT_5_CODEX_MEDIUM_MODEL: &str = "gpt-5-codex";
 
@@ -54,7 +55,7 @@ pub struct Config {
     /// Optional override of model selection.
     pub model: String,
 
-    /// Model used specifically for review sessions. Defaults to "gpt-5".
+    /// Model used specifically for review sessions. Defaults to "gpt-5-codex".
     pub review_model: String,
 
     pub model_family: ModelFamily,
@@ -184,6 +185,10 @@ pub struct Config {
     /// If set to `true`, used only the experimental unified exec tool.
     pub use_experimental_unified_exec_tool: bool,
 
+    /// If set to `true`, use the experimental official Rust MCP client.
+    /// https://github.com/modelcontextprotocol/rust-sdk
+    pub use_experimental_use_rmcp_client: bool,
+
     /// Include the `view_image` tool that lets the agent attach a local image path to context.
     pub include_view_image_tool: bool,
 
@@ -310,37 +315,45 @@ pub fn write_global_mcp_servers(
         for (name, config) in servers {
             let mut entry = TomlTable::new();
             entry.set_implicit(false);
-            entry["command"] = toml_edit::value(config.command.clone());
+            match &config.transport {
+                McpServerTransportConfig::Stdio { command, args, env } => {
+                    entry["command"] = toml_edit::value(command.clone());
 
-            if !config.args.is_empty() {
-                let mut args = TomlArray::new();
-                for arg in &config.args {
-                    args.push(arg.clone());
+                    if !args.is_empty() {
+                        let mut args_array = TomlArray::new();
+                        for arg in args {
+                            args_array.push(arg.clone());
+                        }
+                        entry["args"] = TomlItem::Value(args_array.into());
+                    }
+
+                    if let Some(env) = env
+                        && !env.is_empty()
+                    {
+                        let mut env_table = TomlTable::new();
+                        env_table.set_implicit(false);
+                        let mut pairs: Vec<_> = env.iter().collect();
+                        pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
+                        for (key, value) in pairs {
+                            env_table.insert(key, toml_edit::value(value.clone()));
+                        }
+                        entry["env"] = TomlItem::Table(env_table);
+                    }
                 }
-                entry["args"] = TomlItem::Value(args.into());
+                McpServerTransportConfig::StreamableHttp { url, bearer_token } => {
+                    entry["url"] = toml_edit::value(url.clone());
+                    if let Some(token) = bearer_token {
+                        entry["bearer_token"] = toml_edit::value(token.clone());
+                    }
+                }
             }
 
-            if let Some(env) = &config.env
-                && !env.is_empty()
-            {
-                let mut env_table = TomlTable::new();
-                env_table.set_implicit(false);
-                let mut pairs: Vec<_> = env.iter().collect();
-                pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
-                for (key, value) in pairs {
-                    env_table.insert(key, toml_edit::value(value.clone()));
-                }
-                entry["env"] = TomlItem::Table(env_table);
+            if let Some(timeout) = config.startup_timeout_sec {
+                entry["startup_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
             }
 
-            if let Some(timeout) = config.startup_timeout_ms {
-                let timeout = i64::try_from(timeout).map_err(|_| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "startup_timeout_ms exceeds supported range",
-                    )
-                })?;
-                entry["startup_timeout_ms"] = toml_edit::value(timeout);
+            if let Some(timeout) = config.tool_timeout_sec {
+                entry["tool_timeout_sec"] = toml_edit::value(timeout.as_secs_f64());
             }
 
             doc["mcp_servers"][name.as_str()] = TomlItem::Table(entry);
@@ -695,6 +708,7 @@ pub struct ConfigToml {
 
     pub experimental_use_exec_command_tool: Option<bool>,
     pub experimental_use_unified_exec_tool: Option<bool>,
+    pub experimental_use_rmcp_client: Option<bool>,
 
     pub projects: Option<HashMap<String, ProjectConfig>>,
 
@@ -1045,6 +1059,7 @@ impl Config {
             use_experimental_unified_exec_tool: cfg
                 .experimental_use_unified_exec_tool
                 .unwrap_or(false),
+            use_experimental_use_rmcp_client: cfg.experimental_use_rmcp_client.unwrap_or(false),
             include_view_image_tool,
             active_profile: active_profile_name,
             disable_paste_burst: cfg.disable_paste_burst.unwrap_or(false),
@@ -1163,10 +1178,12 @@ pub fn log_dir(cfg: &Config) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use crate::config_types::HistoryPersistence;
+    use crate::config_types::Notifications;
 
     use super::*;
     use pretty_assertions::assert_eq;
 
+    use std::time::Duration;
     use tempfile::TempDir;
 
     #[test]
@@ -1199,6 +1216,19 @@ persistence = "none"
             }),
             history_no_persistence_cfg.history
         );
+    }
+
+    #[test]
+    fn tui_config_missing_notifications_field_defaults_to_disabled() {
+        let cfg = r#"
+[tui]
+"#;
+
+        let parsed = toml::from_str::<ConfigToml>(cfg)
+            .expect("TUI config without notifications should succeed");
+        let tui = parsed.tui.expect("config should include tui section");
+
+        assert_eq!(tui.notifications, Notifications::Enabled(false));
     }
 
     #[test]
@@ -1275,10 +1305,13 @@ exclude_slash_tmp = true
         servers.insert(
             "docs".to_string(),
             McpServerConfig {
-                command: "echo".to_string(),
-                args: vec!["hello".to_string()],
-                env: None,
-                startup_timeout_ms: None,
+                transport: McpServerTransportConfig::Stdio {
+                    command: "echo".to_string(),
+                    args: vec!["hello".to_string()],
+                    env: None,
+                },
+                startup_timeout_sec: Some(Duration::from_secs(3)),
+                tool_timeout_sec: Some(Duration::from_secs(5)),
             },
         );
 
@@ -1287,13 +1320,171 @@ exclude_slash_tmp = true
         let loaded = load_global_mcp_servers(codex_home.path())?;
         assert_eq!(loaded.len(), 1);
         let docs = loaded.get("docs").expect("docs entry");
-        assert_eq!(docs.command, "echo");
-        assert_eq!(docs.args, vec!["hello".to_string()]);
+        match &docs.transport {
+            McpServerTransportConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "echo");
+                assert_eq!(args, &vec!["hello".to_string()]);
+                assert!(env.is_none());
+            }
+            other => panic!("unexpected transport {other:?}"),
+        }
+        assert_eq!(docs.startup_timeout_sec, Some(Duration::from_secs(3)));
+        assert_eq!(docs.tool_timeout_sec, Some(Duration::from_secs(5)));
 
         let empty = BTreeMap::new();
         write_global_mcp_servers(codex_home.path(), &empty)?;
         let loaded = load_global_mcp_servers(codex_home.path())?;
         assert!(loaded.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn load_global_mcp_servers_accepts_legacy_ms_field() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+
+        std::fs::write(
+            &config_path,
+            r#"
+[mcp_servers]
+[mcp_servers.docs]
+command = "echo"
+startup_timeout_ms = 2500
+"#,
+        )?;
+
+        let servers = load_global_mcp_servers(codex_home.path())?;
+        let docs = servers.get("docs").expect("docs entry");
+        assert_eq!(docs.startup_timeout_sec, Some(Duration::from_millis(2500)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn write_global_mcp_servers_serializes_env_sorted() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let servers = BTreeMap::from([(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "docs-server".to_string(),
+                    args: vec!["--verbose".to_string()],
+                    env: Some(HashMap::from([
+                        ("ZIG_VAR".to_string(), "3".to_string()),
+                        ("ALPHA_VAR".to_string(), "1".to_string()),
+                    ])),
+                },
+                startup_timeout_sec: None,
+                tool_timeout_sec: None,
+            },
+        )]);
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert_eq!(
+            serialized,
+            r#"[mcp_servers.docs]
+command = "docs-server"
+args = ["--verbose"]
+
+[mcp_servers.docs.env]
+ALPHA_VAR = "1"
+ZIG_VAR = "3"
+"#
+        );
+
+        let loaded = load_global_mcp_servers(codex_home.path())?;
+        let docs = loaded.get("docs").expect("docs entry");
+        match &docs.transport {
+            McpServerTransportConfig::Stdio { command, args, env } => {
+                assert_eq!(command, "docs-server");
+                assert_eq!(args, &vec!["--verbose".to_string()]);
+                let env = env
+                    .as_ref()
+                    .expect("env should be preserved for stdio transport");
+                assert_eq!(env.get("ALPHA_VAR"), Some(&"1".to_string()));
+                assert_eq!(env.get("ZIG_VAR"), Some(&"3".to_string()));
+            }
+            other => panic!("unexpected transport {other:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn write_global_mcp_servers_serializes_streamable_http() -> anyhow::Result<()> {
+        let codex_home = TempDir::new()?;
+
+        let mut servers = BTreeMap::from([(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::StreamableHttp {
+                    url: "https://example.com/mcp".to_string(),
+                    bearer_token: Some("secret-token".to_string()),
+                },
+                startup_timeout_sec: Some(Duration::from_secs(2)),
+                tool_timeout_sec: None,
+            },
+        )]);
+
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let config_path = codex_home.path().join(CONFIG_TOML_FILE);
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert_eq!(
+            serialized,
+            r#"[mcp_servers.docs]
+url = "https://example.com/mcp"
+bearer_token = "secret-token"
+startup_timeout_sec = 2.0
+"#
+        );
+
+        let loaded = load_global_mcp_servers(codex_home.path())?;
+        let docs = loaded.get("docs").expect("docs entry");
+        match &docs.transport {
+            McpServerTransportConfig::StreamableHttp { url, bearer_token } => {
+                assert_eq!(url, "https://example.com/mcp");
+                assert_eq!(bearer_token.as_deref(), Some("secret-token"));
+            }
+            other => panic!("unexpected transport {other:?}"),
+        }
+        assert_eq!(docs.startup_timeout_sec, Some(Duration::from_secs(2)));
+
+        servers.insert(
+            "docs".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::StreamableHttp {
+                    url: "https://example.com/mcp".to_string(),
+                    bearer_token: None,
+                },
+                startup_timeout_sec: None,
+                tool_timeout_sec: None,
+            },
+        );
+        write_global_mcp_servers(codex_home.path(), &servers)?;
+
+        let serialized = std::fs::read_to_string(&config_path)?;
+        assert_eq!(
+            serialized,
+            r#"[mcp_servers.docs]
+url = "https://example.com/mcp"
+"#
+        );
+
+        let loaded = load_global_mcp_servers(codex_home.path())?;
+        let docs = loaded.get("docs").expect("docs entry");
+        match &docs.transport {
+            McpServerTransportConfig::StreamableHttp { url, bearer_token } => {
+                assert_eq!(url, "https://example.com/mcp");
+                assert!(bearer_token.is_none());
+            }
+            other => panic!("unexpected transport {other:?}"),
+        }
 
         Ok(())
     }
@@ -1328,7 +1519,7 @@ exclude_slash_tmp = true
         tokio::fs::write(
             &config_path,
             r#"
-model = "gpt-5"
+model = "gpt-5-codex"
 model_reasoning_effort = "medium"
 
 [profiles.dev]
@@ -1403,7 +1594,7 @@ model = "gpt-4"
 model_reasoning_effort = "medium"
 
 [profiles.prod]
-model = "gpt-5"
+model = "gpt-5-codex"
 "#,
         )
         .await?;
@@ -1434,7 +1625,7 @@ model = "gpt-5"
                 .profiles
                 .get("prod")
                 .and_then(|profile| profile.model.as_deref()),
-            Some("gpt-5"),
+            Some("gpt-5-codex"),
         );
 
         Ok(())
@@ -1613,6 +1804,7 @@ model_verbosity = "high"
                 tools_web_search_request: false,
                 use_experimental_streamable_shell_tool: false,
                 use_experimental_unified_exec_tool: false,
+                use_experimental_use_rmcp_client: false,
                 include_view_image_tool: true,
                 active_profile: Some("o3".to_string()),
                 disable_paste_burst: false,
@@ -1671,6 +1863,7 @@ model_verbosity = "high"
             tools_web_search_request: false,
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
+            use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
             active_profile: Some("gpt3".to_string()),
             disable_paste_burst: false,
@@ -1744,6 +1937,7 @@ model_verbosity = "high"
             tools_web_search_request: false,
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
+            use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
             active_profile: Some("zdr".to_string()),
             disable_paste_burst: false,
@@ -1803,6 +1997,7 @@ model_verbosity = "high"
             tools_web_search_request: false,
             use_experimental_streamable_shell_tool: false,
             use_experimental_unified_exec_tool: false,
+            use_experimental_use_rmcp_client: false,
             include_view_image_tool: true,
             active_profile: Some("gpt5".to_string()),
             disable_paste_burst: false,
